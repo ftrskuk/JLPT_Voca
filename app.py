@@ -19,6 +19,23 @@ DEFAULT_CONFIG = {
 }
 
 
+def _clean_word_entries(raw_entries, source_name):
+    cleaned = []
+    for item in raw_entries:
+        if not isinstance(item, dict):
+            continue
+        word = str(item.get("word", "")).strip()
+        reading = str(item.get("reading", "")).strip()
+        meaning = str(item.get("meaning", "")).strip()
+        if word and reading and meaning:
+            cleaned.append({"word": word, "reading": reading, "meaning": meaning})
+
+    if not cleaned:
+        raise ValueError(f"{source_name}에서 유효한 단어 항목을 찾을 수 없습니다.")
+
+    return cleaned
+
+
 def detach_console_window():
     if not sys.platform.startswith("win"):
         return
@@ -106,27 +123,53 @@ def load_words(path: Path):
         with path.open("r", encoding="utf-8") as words_file:
             raw_words = json.load(words_file)
     except FileNotFoundError as exc:
-        raise FileNotFoundError("words.json 파일을 찾을 수 없습니다.") from exc
+        raise FileNotFoundError(f"{path.name} 파일을 찾을 수 없습니다.") from exc
     except json.JSONDecodeError as exc:
-        raise ValueError("words.json 형식이 올바르지 않습니다.") from exc
+        raise ValueError(f"{path.name} 형식이 올바르지 않습니다.") from exc
 
-    if not isinstance(raw_words, list) or not raw_words:
-        raise ValueError("words.json 에는 하나 이상의 단어가 포함된 배열이 있어야 합니다.")
+    if not isinstance(raw_words, list):
+        raise ValueError(f"{path.name}에는 단어 객체 배열이 필요합니다.")
 
-    words = []
-    for item in raw_words:
-        if not isinstance(item, dict):
-            continue
-        word = str(item.get("word", "")).strip()
-        reading = str(item.get("reading", "")).strip()
-        meaning = str(item.get("meaning", "")).strip()
-        if word and reading and meaning:
-            words.append({"word": word, "reading": reading, "meaning": meaning})
+    return _clean_word_entries(raw_words, path.name)
 
-    if not words:
-        raise ValueError("유효한 단어 항목을 words.json 에서 찾을 수 없습니다.")
 
-    return words
+def load_words_from_csv(path: Path):
+    try:
+        with path.open("r", encoding="utf-8", newline="") as csv_file:
+            reader = csv.DictReader(csv_file)
+            if reader.fieldnames is None:
+                raise ValueError(f"{path.name}에 헤더 행이 필요합니다.")
+            header_map = {}
+            for name in reader.fieldnames:
+                if not name:
+                    continue
+                normalized = name.strip().lstrip("\ufeff").lower()
+                if normalized:
+                    header_map[normalized] = name
+            required = {"word", "reading", "meaning"}
+            if not required.issubset(header_map):
+                raise ValueError(
+                    f"{path.name}에는 word, reading, meaning 헤더가 모두 포함되어야 합니다."
+                )
+            rows = []
+            for row in reader:
+                rows.append(
+                    {
+                        "word": row.get(header_map["word"], ""),
+                        "reading": row.get(header_map["reading"], ""),
+                        "meaning": row.get(header_map["meaning"], ""),
+                    }
+                )
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"{path.name} 파일을 찾을 수 없습니다.") from exc
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{path.name}을(를) UTF-8로 읽을 수 없습니다.") from exc
+    except csv.Error as exc:
+        raise ValueError(f"{path.name} CSV 내용을 해석할 수 없습니다: {exc}") from exc
+    except OSError as exc:
+        raise OSError(f"{path.name} 파일을 열 수 없습니다: {exc}") from exc
+
+    return _clean_word_entries(rows, path.name)
 
 
 def save_words(path: Path, words):
@@ -222,8 +265,11 @@ class SettingsWindow(tk.Toplevel):
         ttk.Button(action_frame, text="추가", command=self._add_word).grid(row=0, column=0, padx=5, pady=5)
         ttk.Button(action_frame, text="수정", command=self._edit_word).grid(row=0, column=1, padx=5, pady=5)
         ttk.Button(action_frame, text="삭제", command=self._delete_word).grid(row=0, column=2, padx=5, pady=5)
-        ttk.Button(action_frame, text="단어 저장", command=self._save_words).grid(
+        ttk.Button(action_frame, text="파일 불러오기", command=self._import_words).grid(
             row=0, column=3, padx=5, pady=5
+        )
+        ttk.Button(action_frame, text="단어 저장", command=self._save_words).grid(
+            row=0, column=4, padx=5, pady=5
         )
 
         ttk.Button(action_frame, text="JSON 내보내기", command=self._export_json).grid(
@@ -321,6 +367,48 @@ class SettingsWindow(tk.Toplevel):
         self._refresh_tree()
         self.app.save_words(self.words_data)
         messagebox.showinfo("완료", "단어 목록이 저장되었습니다.", parent=self)
+
+    def _import_words(self):
+        path_str = filedialog.askopenfilename(
+            parent=self,
+            title="단어 파일 불러오기",
+            filetypes=[
+                ("지원되는 파일", "*.json *.csv"),
+                ("JSON 파일", "*.json"),
+                ("CSV 파일", "*.csv"),
+                ("모든 파일", "*.*"),
+            ],
+        )
+        if not path_str:
+            return
+
+        path = Path(path_str)
+        try:
+            if path.suffix.lower() == ".csv":
+                imported = load_words_from_csv(path)
+            else:
+                imported = load_words(path)
+        except (FileNotFoundError, ValueError) as exc:
+            messagebox.showerror("불러오기 실패", str(exc), parent=self)
+            return
+        except OSError as exc:
+            messagebox.showerror("불러오기 실패", f"파일을 열 수 없습니다:\n{exc}", parent=self)
+            return
+
+        previous = [dict(item) for item in self.words_data]
+        self.words_data = [dict(item) for item in imported]
+        self._refresh_tree()
+
+        try:
+            self.app.save_words(self.words_data)
+        except OSError as exc:
+            self.words_data = previous
+            self._refresh_tree()
+            self.app.set_words(previous)
+            messagebox.showerror("저장 실패", f"단어 목록을 저장할 수 없습니다:\n{exc}", parent=self)
+            return
+
+        messagebox.showinfo("불러오기", "단어 파일을 불러와 저장했습니다.", parent=self)
 
     def _export_json(self):
         if not self.words_data:
@@ -590,8 +678,9 @@ class WordCyclerApp:
             self.pause_button.config(text="재생")
 
     def save_words(self, words):
-        self.word_bank = [dict(item) for item in words]
-        save_words(WORDS_PATH, self.word_bank)
+        cleaned = [dict(item) for item in words]
+        save_words(WORDS_PATH, cleaned)
+        self.word_bank = cleaned
         self.set_words(self.word_bank)
 
     def set_words(self, words):
