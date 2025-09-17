@@ -1,18 +1,45 @@
+import csv
 import json
 import random
+import sys
 import time
 from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 CONFIG_PATH = Path(__file__).with_name("config.json")
 WORDS_PATH = Path(__file__).with_name("words.json")
+ICON_PNG_PATH = Path(__file__).with_name("icon.png")
+ICON_ICO_PATH = Path(__file__).with_name("icon.ico")
 
 DEFAULT_CONFIG = {
     "showMeaningTimer": 3,
     "nextWordTimer": 5,
     "alwaysOnTop": True,
 }
+
+
+def detach_console_window():
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_console_window = kernel32.GetConsoleWindow
+        get_console_window.restype = ctypes.c_void_p
+        hwnd = get_console_window()
+        if not hwnd:
+            return
+        get_console_process_list = kernel32.GetConsoleProcessList
+        get_console_process_list.argtypes = [ctypes.POINTER(ctypes.c_ulong), ctypes.c_ulong]
+        get_console_process_list.restype = ctypes.c_ulong
+        process_ids = (ctypes.c_ulong * 1)()
+        count = get_console_process_list(process_ids, 1)
+        if count <= 1:
+            kernel32.FreeConsole()
+    except Exception:
+        pass
 
 
 def parse_positive_int(value, fallback):
@@ -102,18 +129,24 @@ def load_words(path: Path):
     return words
 
 
+def save_words(path: Path, words):
+    with path.open("w", encoding="utf-8") as words_file:
+        json.dump(words, words_file, ensure_ascii=False, indent=2)
+
+
 class SettingsWindow(tk.Toplevel):
     def __init__(self, app: "WordCyclerApp"):
         super().__init__(app.root)
         self.app = app
         self.title("설정")
-        self.resizable(False, False)
+        self.resizable(True, True)
         self.transient(app.root)
         self.grab_set()
 
         self.show_meaning_var = tk.StringVar(value=str(app.config_manager.data["showMeaningTimer"]))
         self.next_word_var = tk.StringVar(value=str(app.config_manager.data["nextWordTimer"]))
         self.always_on_top_var = tk.BooleanVar(value=app.config_manager.data["alwaysOnTop"])
+        self.words_data = [dict(item) for item in app.get_all_words()]
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -121,35 +154,93 @@ class SettingsWindow(tk.Toplevel):
         self.update_idletasks()
         root_x = self.app.root.winfo_rootx()
         root_y = self.app.root.winfo_rooty()
+        if self.app.icon_image is not None:
+            self.iconphoto(False, self.app.icon_image)
         self.geometry(f"+{root_x + 40}+{root_y + 40}")
 
     def _build_ui(self):
-        padding = {"padx": 10, "pady": 5}
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
 
-        ttk.Label(self, text="발음/뜻 표시 시간(초)").grid(row=0, column=0, sticky="w", **padding)
-        ttk.Entry(self, textvariable=self.show_meaning_var, width=10).grid(
-            row=0, column=1, sticky="e", **padding
+        notebook = ttk.Notebook(self)
+        notebook.grid(row=0, column=0, sticky="nsew")
+
+        general_frame = ttk.Frame(notebook, padding=10)
+        general_frame.columnconfigure(1, weight=1)
+        notebook.add(general_frame, text="일반")
+
+        ttk.Label(general_frame, text="발음/뜻 표시 시간(초)").grid(row=0, column=0, sticky="w", pady=(0, 5))
+        ttk.Entry(general_frame, textvariable=self.show_meaning_var, width=10).grid(
+            row=0, column=1, sticky="ew", pady=(0, 5)
         )
 
-        ttk.Label(self, text="다음 단어 표시 시간(초)").grid(row=1, column=0, sticky="w", **padding)
-        ttk.Entry(self, textvariable=self.next_word_var, width=10).grid(
-            row=1, column=1, sticky="e", **padding
+        ttk.Label(general_frame, text="다음 단어 표시 시간(초)").grid(row=1, column=0, sticky="w", pady=(0, 5))
+        ttk.Entry(general_frame, textvariable=self.next_word_var, width=10).grid(
+            row=1, column=1, sticky="ew", pady=(0, 5)
         )
 
-        ttk.Checkbutton(self, text="항상 위에 표시", variable=self.always_on_top_var).grid(
-            row=2, column=0, columnspan=2, sticky="w", **padding
+        ttk.Checkbutton(
+            general_frame,
+            text="항상 위에 표시",
+            variable=self.always_on_top_var,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
+        ttk.Button(general_frame, text="설정 저장", command=self._save_settings).grid(
+            row=3, column=0, columnspan=2, pady=(0, 5)
         )
 
-        button_frame = ttk.Frame(self)
-        button_frame.grid(row=3, column=0, columnspan=2, pady=(10, 10))
-        ttk.Button(button_frame, text="저장", command=self._save).grid(row=0, column=0, padx=5)
+        vocab_frame = ttk.Frame(notebook, padding=10)
+        vocab_frame.columnconfigure(0, weight=1)
+        vocab_frame.rowconfigure(1, weight=1)
+        notebook.add(vocab_frame, text="단어")
+
+        ttk.Label(vocab_frame, text="단어 목록").grid(row=0, column=0, sticky="w")
+
+        columns = ("word", "reading", "meaning")
+        self.tree = ttk.Treeview(
+            vocab_frame,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+            height=10,
+        )
+        self.tree.heading("word", text="단어")
+        self.tree.heading("reading", text="발음")
+        self.tree.heading("meaning", text="뜻")
+        self.tree.column("word", anchor="w", width=120, stretch=True)
+        self.tree.column("reading", anchor="w", width=120, stretch=True)
+        self.tree.column("meaning", anchor="w", width=200, stretch=True)
+
+        scrollbar = ttk.Scrollbar(vocab_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.grid(row=1, column=0, sticky="nsew")
+        scrollbar.grid(row=1, column=1, sticky="ns")
+
+        action_frame = ttk.Frame(vocab_frame)
+        action_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+
+        ttk.Button(action_frame, text="추가", command=self._add_word).grid(row=0, column=0, padx=5, pady=5)
+        ttk.Button(action_frame, text="수정", command=self._edit_word).grid(row=0, column=1, padx=5, pady=5)
+        ttk.Button(action_frame, text="삭제", command=self._delete_word).grid(row=0, column=2, padx=5, pady=5)
+        ttk.Button(action_frame, text="단어 저장", command=self._save_words).grid(
+            row=0, column=3, padx=5, pady=5
+        )
+
+        ttk.Button(action_frame, text="JSON 내보내기", command=self._export_json).grid(
+            row=1, column=0, columnspan=2, padx=5, pady=5, sticky="w"
+        )
+        ttk.Button(action_frame, text="CSV 내보내기", command=self._export_csv).grid(
+            row=1, column=2, columnspan=2, padx=5, pady=5, sticky="w"
+        )
+
+        self._refresh_tree()
 
     def _on_close(self):
         self.grab_release()
         self.destroy()
         self.app.settings_window = None
 
-    def _save(self):
+    def _save_settings(self):
         show_meaning = parse_positive_int(self.show_meaning_var.get(), -1)
         next_word = parse_positive_int(self.next_word_var.get(), -1)
 
@@ -158,18 +249,210 @@ class SettingsWindow(tk.Toplevel):
             return
 
         self.app.update_config(show_meaning, next_word, self.always_on_top_var.get())
-        self._on_close()
+        messagebox.showinfo("완료", "설정이 저장되었습니다.", parent=self)
+
+    def _refresh_tree(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for index, entry in enumerate(self.words_data):
+            self.tree.insert("", "end", iid=str(index), values=(entry["word"], entry["reading"], entry["meaning"]))
+
+    def _get_selected_index(self):
+        selection = self.tree.selection()
+        if not selection:
+            return None
+        try:
+            return int(selection[0])
+        except (ValueError, IndexError):
+            return None
+
+    def _open_word_editor(self, title, initial=None):
+        dialog = WordEditorDialog(self, title, initial)
+        self.wait_window(dialog)
+        return dialog.result
+
+    def _add_word(self):
+        result = self._open_word_editor("단어 추가")
+        if result is None:
+            return
+        self.words_data.append(result)
+        self._refresh_tree()
+        self.tree.selection_set(str(len(self.words_data) - 1))
+
+    def _edit_word(self):
+        index = self._get_selected_index()
+        if index is None:
+            messagebox.showwarning("선택 필요", "수정할 단어를 선택하세요.", parent=self)
+            return
+        current = self.words_data[index]
+        result = self._open_word_editor("단어 수정", current)
+        if result is None:
+            return
+        self.words_data[index] = result
+        self._refresh_tree()
+        self.tree.selection_set(str(index))
+
+    def _delete_word(self):
+        index = self._get_selected_index()
+        if index is None:
+            messagebox.showwarning("선택 필요", "삭제할 단어를 선택하세요.", parent=self)
+            return
+        confirm = messagebox.askyesno("삭제 확인", "선택한 단어를 삭제하시겠습니까?", parent=self)
+        if not confirm:
+            return
+        del self.words_data[index]
+        self._refresh_tree()
+
+    def _save_words(self):
+        cleaned = []
+        for entry in self.words_data:
+            word = entry["word"].strip()
+            reading = entry["reading"].strip()
+            meaning = entry["meaning"].strip()
+            if not (word and reading and meaning):
+                continue
+            cleaned.append({"word": word, "reading": reading, "meaning": meaning})
+
+        if not cleaned:
+            messagebox.showerror("저장 오류", "단어 목록에 최소 한 개의 항목이 필요합니다.", parent=self)
+            return
+
+        self.words_data = cleaned
+        self._refresh_tree()
+        self.app.save_words(self.words_data)
+        messagebox.showinfo("완료", "단어 목록이 저장되었습니다.", parent=self)
+
+    def _export_json(self):
+        if not self.words_data:
+            messagebox.showwarning("내보내기", "내보낼 단어가 없습니다.", parent=self)
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="JSON 내보내기",
+            defaultextension=".json",
+            filetypes=[("JSON 파일", "*.json"), ("모든 파일", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as json_file:
+                json.dump(self.words_data, json_file, ensure_ascii=False, indent=2)
+        except OSError as exc:
+            messagebox.showerror("내보내기 실패", f"파일을 저장할 수 없습니다:\n{exc}", parent=self)
+            return
+        messagebox.showinfo("내보내기", "JSON 파일로 내보내기 완료", parent=self)
+
+    def _export_csv(self):
+        if not self.words_data:
+            messagebox.showwarning("내보내기", "내보낼 단어가 없습니다.", parent=self)
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="CSV 내보내기",
+            defaultextension=".csv",
+            filetypes=[("CSV 파일", "*.csv"), ("모든 파일", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerow(["word", "reading", "meaning"])
+                for entry in self.words_data:
+                    writer.writerow([entry["word"], entry["reading"], entry["meaning"]])
+        except OSError as exc:
+            messagebox.showerror("내보내기 실패", f"파일을 저장할 수 없습니다:\n{exc}", parent=self)
+            return
+        messagebox.showinfo("내보내기", "CSV 파일로 내보내기 완료", parent=self)
+
+
+class WordEditorDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Toplevel, title: str, initial=None):
+        super().__init__(parent)
+        self.result = None
+        self.title(title)
+        self.transient(parent)
+        self.grab_set()
+        self.resizable(False, False)
+
+        word_value = ""
+        reading_value = ""
+        meaning_value = ""
+        if isinstance(initial, dict):
+            word_value = initial.get("word", "")
+            reading_value = initial.get("reading", "")
+            meaning_value = initial.get("meaning", "")
+
+        self.word_var = tk.StringVar(value=word_value)
+        self.reading_var = tk.StringVar(value=reading_value)
+        self.meaning_var = tk.StringVar(value=meaning_value)
+
+        self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        self.focus()
+        self.update_idletasks()
+        parent_x = parent.winfo_rootx()
+        parent_y = parent.winfo_rooty()
+        self.geometry(f"+{parent_x + 60}+{parent_y + 60}")
+
+    def _build_ui(self):
+        padding = {"padx": 10, "pady": 5}
+
+        ttk.Label(self, text="단어").grid(row=0, column=0, sticky="w", **padding)
+        ttk.Entry(self, textvariable=self.word_var, width=25).grid(
+            row=0, column=1, sticky="ew", **padding
+        )
+
+        ttk.Label(self, text="발음").grid(row=1, column=0, sticky="w", **padding)
+        ttk.Entry(self, textvariable=self.reading_var, width=25).grid(
+            row=1, column=1, sticky="ew", **padding
+        )
+
+        ttk.Label(self, text="뜻").grid(row=2, column=0, sticky="w", **padding)
+        ttk.Entry(self, textvariable=self.meaning_var, width=25).grid(
+            row=2, column=1, sticky="ew", **padding
+        )
+
+        button_frame = ttk.Frame(self)
+        button_frame.grid(row=3, column=0, columnspan=2, pady=(10, 10))
+        ttk.Button(button_frame, text="확인", command=self._on_confirm).grid(
+            row=0, column=0, padx=5
+        )
+        ttk.Button(button_frame, text="취소", command=self._on_cancel).grid(
+            row=0, column=1, padx=5
+        )
+
+    def _on_confirm(self):
+        word = self.word_var.get().strip()
+        reading = self.reading_var.get().strip()
+        meaning = self.meaning_var.get().strip()
+        if not (word and reading and meaning):
+            messagebox.showerror("입력 오류", "모든 항목을 입력하세요.", parent=self)
+            return
+        self.result = {"word": word, "reading": reading, "meaning": meaning}
+        self._finish()
+
+    def _on_cancel(self):
+        self.result = None
+        self._finish()
+
+    def _finish(self):
+        self.grab_release()
+        self.destroy()
 
 
 class WordCyclerApp:
     def __init__(self, root: tk.Tk, words):
         self.root = root
         self.root.title("JLPT 단어 암기")
-        self.root.resizable(False, False)
-
+        self.root.resizable(True, True)
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        self.icon_image = None
+        self._drag_offset = None
         self.config_manager = ConfigManager(CONFIG_PATH)
-        self.words = list(words)
-        random.shuffle(self.words)
+        self.word_bank = [dict(item) for item in words]
+        self.words = []
         self.current_index = 0
 
         self.word_var = tk.StringVar()
@@ -184,53 +467,80 @@ class WordCyclerApp:
         self.remaining_ms = None
         self.job_end_time = None
 
+        self._set_window_icon()
         self._build_ui()
+        self.root.bind("<Configure>", self._on_resize, add="+")
         self.apply_topmost()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        self.display_word()
+        self.root.update_idletasks()
+        self.root.minsize(self.root.winfo_width(), self.root.winfo_height())
+        self._update_wraplengths(self.root.winfo_width())
+
+        self.set_words(self.word_bank)
 
     def _build_ui(self):
         main_frame = ttk.Frame(self.root, padding=15)
-        main_frame.grid(row=0, column=0)
+        main_frame.grid(row=0, column=0, sticky="nsew")
         main_frame.columnconfigure(0, weight=1)
         main_frame.columnconfigure(1, weight=1)
+        main_frame.rowconfigure(2, weight=1)
+        main_frame.rowconfigure(4, weight=1)
 
-        ttk.Label(main_frame, textvariable=self.word_var, font=("Helvetica", 20, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10)
+        self.word_label = ttk.Label(
+            main_frame, textvariable=self.word_var, font=("Helvetica", 20, "bold")
         )
+        self.word_label.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
 
         ttk.Label(main_frame, text="발음", font=("Helvetica", 10)).grid(
             row=1, column=0, sticky="w"
         )
-        ttk.Label(
+        self.reading_label = ttk.Label(
             main_frame,
             textvariable=self.reading_var,
             font=("Helvetica", 16),
             wraplength=260,
-        ).grid(
-            row=2, column=0, columnspan=2, sticky="w"
         )
+        self.reading_label.grid(row=2, column=0, columnspan=2, sticky="ew")
 
         ttk.Label(main_frame, text="뜻", font=("Helvetica", 10)).grid(row=3, column=0, sticky="w")
-        ttk.Label(
+        self.meaning_label = ttk.Label(
             main_frame,
             textvariable=self.meaning_var,
             font=("Helvetica", 16),
             wraplength=260,
-        ).grid(
-            row=4, column=0, columnspan=2, sticky="w"
         )
+        self.meaning_label.grid(row=4, column=0, columnspan=2, sticky="ew")
 
         control_frame = ttk.Frame(main_frame)
-        control_frame.grid(row=5, column=0, columnspan=2, pady=(15, 0))
+        control_frame.grid(row=5, column=0, columnspan=2, pady=(15, 0), sticky="ew")
+        control_frame.columnconfigure(0, weight=1)
+        control_frame.columnconfigure(1, weight=1)
 
         self.pause_button = ttk.Button(control_frame, text="일시정지", command=self.toggle_pause)
         self.pause_button.grid(row=0, column=0, padx=5)
 
         self.settings_button = ttk.Button(control_frame, text="⚙️", width=3, command=self.open_settings)
         self.settings_button.grid(row=0, column=1, padx=5)
+
+        self.root.bind("<ButtonPress-1>", self._start_window_move, add="+")
+        self.root.bind("<B1-Motion>", self._perform_window_move, add="+")
+        self.root.bind("<ButtonRelease-1>", self._stop_window_move, add="+")
+
+    def _on_resize(self, event):
+        if event.widget is self.root:
+            self._update_wraplengths(event.width)
+
+    def _update_wraplengths(self, width=None):
+        if width is None or width <= 1:
+            width = self.root.winfo_width()
+        if width <= 1:
+            return
+        padding = 60
+        wrap_length = max(width - padding, 160)
+        self.reading_label.configure(wraplength=wrap_length)
+        self.meaning_label.configure(wraplength=wrap_length)
 
     def apply_topmost(self):
         self.root.attributes("-topmost", self.config_manager.data["alwaysOnTop"])
@@ -278,6 +588,27 @@ class WordCyclerApp:
         if was_paused:
             self.paused = True
             self.pause_button.config(text="재생")
+
+    def save_words(self, words):
+        self.word_bank = [dict(item) for item in words]
+        save_words(WORDS_PATH, self.word_bank)
+        self.set_words(self.word_bank)
+
+    def set_words(self, words):
+        self.word_bank = [dict(item) for item in words]
+        self.words = list(self.word_bank)
+        if self.words:
+            random.shuffle(self.words)
+        self.current_index = 0
+        was_paused = self.paused
+        self._clear_job()
+        self.display_word()
+        if was_paused:
+            self.paused = True
+            self.pause_button.config(text="재생")
+
+    def get_all_words(self):
+        return [dict(item) for item in self.word_bank]
 
     def display_word(self):
         if not self.words:
@@ -351,14 +682,47 @@ class WordCyclerApp:
         self.remaining_ms = None
         self.job_end_time = None
 
+    def _start_window_move(self, event):
+        widget = event.widget
+        if widget in (self.pause_button, self.settings_button):
+            return
+        if widget.winfo_toplevel() is not self.root:
+            return
+        self._drag_offset = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
+
+    def _perform_window_move(self, event):
+        if self._drag_offset is None:
+            return
+        dx, dy = self._drag_offset
+        new_x = event.x_root - dx
+        new_y = event.y_root - dy
+        self.root.geometry(f"+{new_x}+{new_y}")
+
+    def _stop_window_move(self, event):
+        self._drag_offset = None
+
     def _on_close(self):
         self._clear_job()
         if self.settings_window and self.settings_window.winfo_exists():
             self.settings_window._on_close()
         self.root.destroy()
 
+    def _set_window_icon(self):
+        if ICON_ICO_PATH.exists():
+            try:
+                self.root.iconbitmap(str(ICON_ICO_PATH))
+            except Exception:
+                pass
+        if ICON_PNG_PATH.exists():
+            try:
+                self.icon_image = tk.PhotoImage(file=str(ICON_PNG_PATH))
+                self.root.iconphoto(False, self.icon_image)
+            except Exception:
+                self.icon_image = None
+
 
 def main():
+    detach_console_window()
     root = tk.Tk()
     try:
         words = load_words(WORDS_PATH)
