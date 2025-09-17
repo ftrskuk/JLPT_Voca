@@ -1,5 +1,3 @@
-# JLPT_Voca
-For codex testing with JLPT Vocabulary memorizing app
 # JLPT Vocabulary Cycler
 
 데스크톱에서 실행되는 간단한 JLPT 단어 순환 암기 프로그램입니다. `words.json`에 정의된 단어를 무작위로 순환하며, 설정한 시간 간격에 따라 단어 → 발음/뜻 순으로 표시합니다.
@@ -29,6 +27,7 @@ python app.py
 ## 단어 데이터 관리
 설정 창의 **단어** 탭에서 단어를 테이블 형태로 조회하고 추가/수정/삭제할 수 있습니다.
 
-- `단어 저장`을 누르면 변경 사항이 즉시 `words.json`에 반영되고 메인 화면에 적용됩니다.
+- `파일 불러오기`로 JSON 또는 CSV 파일을 선택하면 목록이 즉시 갱신되어 `words.json`에 저장되고 메인 화면에도 반영됩니다. CSV 파일은 헤더에 `word`, `reading`, `meaning` 열이 포함되어 있어야 합니다.
+- `단어 저장`을 누르면 편집한 내용이 `words.json`에 반영되고 메인 화면에 적용됩니다.
 - `JSON 내보내기`, `CSV 내보내기` 버튼으로 현재 목록을 다른 파일로 내보낼 수 있습니다.
 - 모든 단어 항목은 `word`, `reading`, `meaning` 세 필드를 포함해야 하며, 프로그램 실행 시 무작위로 섞여 반복됩니다.
